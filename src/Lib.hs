@@ -1,58 +1,80 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 module Lib
      where
 
 import System
-import Storage
+import Single
 import World
 import Types
 import Archetype
-import Data.Proxy (Proxy(..))
 import Control.Monad.ST
-import Control.Monad (replicateM, foldM)
-import qualified Data.Vector.Mutable as M
+import Control.Monad (replicateM)
+import qualified Data.Vector.Unboxed.Mutable as M
+import qualified Data.Vector as V
+import Data.Vector.Unboxed.Deriving
 
 import Linear
--- import Criterion
--- import qualified Criterion.Main as C
--- import Criterion.Types
+import Criterion
+import qualified Criterion.Main as C
+import Criterion.Types
 
-newtype ECSPos = ECSPos (V2 Float)
+newtype ECSPos = ECSPos { unECSPos :: V2 Float } deriving (Show)
+derivingUnbox "ECSPos" [t| ECSPos -> V2 Float |] [| unECSPos |] [| ECSPos |]
 
-type instance StorageVector ECSPos = M.MVector
+instance Component ECSPos where
+    type StorageVector ECSPos = M.MVector
 
-newtype ECSVel = ECSVel (V2 Float)
+newtype ECSVel = ECSVel { unECSVel :: V2 Float }
 
-type instance StorageVector ECSVel = M.MVector
+derivingUnbox "ECSVel" [t| ECSVel -> V2 Float |] [| unECSVel |] [| ECSVel |]
+instance Component ECSVel where
+    type StorageVector ECSVel = M.MVector
 
-testSystem ((ECSVel v) :> (ECSPos p)) = ECSPos (p + v)
+newtype Delta = Delta Float
 
-type W s = World' (ST s) '[ '( '[ECSPos, ECSVel], '[ECSPos, ECSVel], Int ), '( '[ECSPos], '[ECSPos], Int ) ]
+type APosVel s = Archetype s '[ECSPos, ECSVel]
+type APos s = Archetype s '[ECSPos]
+type World' s = World '[APosVel s, APos s, Single s Delta]
 
-initWorld :: ST s (W s)
-initWorld= do
-    a <- archetypeNew @'[ECSPos, ECSVel]
-    a1 <- foldM (\s _ -> fmap snd $ archetypeAdd s (HCons (ECSPos 0) (HCons (ECSVel 1) HNil))) a [1..1000]
-    b <- archetypeNew @'[ECSPos]
-    b1 <- foldM (\s _ -> fmap snd $ archetypeAdd s (HCons (ECSPos 0) HNil)) b [1..9000]
-    return $ WCons a1 $ WCons b1 WNil
+initWorld :: ST s (World' s)
+initWorld = do
+    let a = archetypeNew @'[ECSPos, ECSVel]
+    let b = archetypeNew @'[ECSPos]
+    a1 <- archetypeAdd a $ V.replicate 1000 (HCons (ECSPos 0) (HCons (ECSVel 1) HNil))
+    b1 <- archetypeAdd b $ V.replicate 1000 (HCons (ECSPos 0) HNil)
+    d <- newSingle (Delta 0.5)
+    return $ World (HCons a1 $ HCons b1 $ HCons d HNil)
 
-step :: W s -> ST s ()
-step w = runSystem w $ \(ECSVel v :> ECSPos p) -> ECSPos (p + v)
-        
--- someFunc :: IO ()
--- someFunc = C.defaultMainWith (C.defaultConfig {timeLimit = 10})
---     [ bgroup "pos_vel"
---         [ bench "init" $ whnfIO $ stToIO $ initWorld
---         , bench "step" $ whnfIO $ stToIO $ initWorld >>= step
---         ]
---     ]
-
-someFunc :: IO ()
-someFunc = stToIO $ do
-    w <- initWorld
-    replicateM 1000 (step w)
+step :: World' s -> ST s ()
+step w = do
+    _ <- replicateM 10 $ runSystem w $ \(Indexed _ (ECSVel v :> ECSPos p)) -> ECSPos (p + v)
     return ()
+        
+someFunc :: IO ()
+someFunc = C.defaultMainWith (C.defaultConfig {timeLimit = 10})
+    [ bgroup "pos_vel"
+        [ bench "init" $ whnfIO $ stToIO $ initWorld
+        , bench "step" $ whnfIO $ stToIO $ initWorld >>= step
+        ]
+    ]
+
+-- someFunc :: IO ()
+-- someFunc = do
+--     _ <- replicateM 1000 $ do
+--         _ <- stToIO $ do
+--             _ <- initWorld
+--             -- step w
+--             -- _ <- replicateM 10000 (step w)
+--             -- let (World (HCons a _)) = w
+--             -- get a (0, 0)
+--             return ()
+--         -- let HCons res' _ = (res :: HList '[ECSPos])
+--         -- print res'
+--         return ()
+--     return ()
